@@ -1,0 +1,2 @@
+/Users/f007znp/Research/processed/SDSS_BOSS/spec-104657-59820-27021600024562938.fits 104657
+/Users/f007znp/Research/processed/SDSS_BOSS/spec-8178-57428-0536.fits 8178
