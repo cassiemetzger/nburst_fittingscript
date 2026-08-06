@@ -11,7 +11,9 @@ For spectra above 0.7, we investigate whether or not they are an LRG. If a sourc
     <li><code>(sdss_i - sdss_z > 0.7) & (sdss_i - source['WISE_w1mpro'] > (2.143)*(sdss_i -sdss_z) - 0.2) & (sdss_z < 19.95) & (sdss_i > 19.9)</code></li>
     <li><code>(sdss_r - sdss_i > 0.98) & (sdss_r - source['WISE_w1mpro'] > 2*(sdss_r - sdss_i)) & (sdss_i - sdss_z > 0.625) & (sdss_z < 19.95) & (sdss_i > 19.9)</code></li>
 </ul>
-A narrow line + broad line fit is then applied. A 160 Angstrom window around Halpha is defined and the RMS residual is computed for the NL + BL fit and then again for NL + BL fit with the BL component subtracted. If the residual is closer to 
+A narrow line + broad line fit is then applied. A 160 Angstrom window around Halpha is defined and the RMS residual is computed for the NL + BL fit and then again for NL + BL fit with the BL component subtracted. If Halpha falls outside the observed wavelength range, [Mg II]2796 and Hbeta are inspected instead. If the residual for the NL+BL fit is closer to 1, the spectrum is declared to be broad. Otherwise, the spectrum is declared to be narrow. If the spectrum is narrow, a narrow line only fit is reapplied. 
+
+Once the spectrum has been classified as either broad or narrow, the H3 component of the Gauss-Hermite function is inspected. If it is negative, an outflow is present and we refit the spectrum with an outflow component. 
 
 ## Installing dependencies 
 To run this code, Nbursts must be installed via Bitbucket. An <a href="https://www.atlassian.com/try/cloud/signup?bundle=bitbucket">Atlassian</a> account is required to do this. If this is your first time using Bitbucket, remember to set up an API token on your local machine! 
