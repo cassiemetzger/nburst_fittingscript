@@ -1,0 +1,10 @@
+outputs/*
+plots/*
+organize_desi.ipynb
+highz_output.txt
+imbh_sample_prepared.fits
+script_proto.ipynb
+source_file.txt
+fit_file.txt
+Halpha_NLoffset.pdf
+example_spectra.pdf

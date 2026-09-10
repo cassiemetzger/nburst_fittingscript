@@ -1,0 +1,1 @@
+file,ra,dec,redshift,survey,continuum,classification,delta_BIC,outflow,fit_fail,hit_limit,nburst_file
