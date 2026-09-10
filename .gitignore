@@ -1,5 +1,4 @@
 outputs/*
-plots/*
 organize_desi.ipynb
 highz_output.txt
 imbh_sample_prepared.fits
