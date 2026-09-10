@@ -3,17 +3,14 @@ Running this script requires knowledge of Nbursts, GDL, IDLAstro, and several st
 
 This spectral fitting code proceeds as follows: 
 <p align="center">
-<img width="600" height="500" alt="Spectral_fitting_flowchart" src="https://github.com/user-attachments/assets/d6abe2de-4baa-4df0-9a32-ad62c5fc60b9" />
+<img width="600" height="500" alt="Spectral_fitting_flowchart" src="plots/spectral_fitting_simple.png" />
 </p>
 Spectra are grouped by redshift. All spectrum under redshift 0.7 are fit with a stellar continuum </li>
-For spectra above 0.7, we investigate whether or not they are an LRG. If a source exhibits either of the following criteria, it is considered an LRG and fit with a stellar continuum: 
-<ul>
-    <li><code>(sdss_i - sdss_z > 0.7) & (sdss_i - source['WISE_w1mpro'] > (2.143)*(sdss_i -sdss_z) - 0.2) & (sdss_z < 19.95) & (sdss_i > 19.9)</code></li>
-    <li><code>(sdss_r - sdss_i > 0.98) & (sdss_r - source['WISE_w1mpro'] > 2*(sdss_r - sdss_i)) & (sdss_i - sdss_z > 0.625) & (sdss_z < 19.95) & (sdss_i > 19.9)</code></li>
-</ul>
-A narrow line + broad line fit is then applied. A 160 Angstrom window around Halpha is defined and the RMS residual is computed for the NL + BL fit and then again for NL + BL fit with the BL component subtracted. If Halpha falls outside the observed wavelength range, [Mg II]2796 and Hbeta are inspected instead. If the residual for the NL+BL fit is closer to 1, the spectrum is declared to be broad. Otherwise, the spectrum is declared to be narrow. If the spectrum is narrow, a narrow line only fit is reapplied. 
+For spectra above 0.7, we investigate whether or not they are an LRG. SDSS sources are classified as LRGs according to the criteria defined in <a href = "https://arxiv.org/abs/1508.04473"> Dawson+2016</a>. DESI sources are classified as LRGs according to the criteria outlined in <a href = "https://ui.adsabs.harvard.edu/abs/2020RNAAS...4..181Z/abstract"> Zhou+2020</a>.
 
-Once the spectrum has been classified as either broad or narrow, the H3 component of the Gauss-Hermite function is inspected. If it is negative, an outflow is present and we refit the spectrum with an outflow component. 
+A narrow line + broad line fit is then applied. A 60 Angstrom window around Halpha is defined and the BIC is computed for the NL + BL fit and then again for NL + BL fit with the BL component subtracted. If Halpha falls outside the observed wavelength range, [Mg II]2796 and Hbeta are inspected instead. If $\Delta BIC > 6$, we take the fit with the lower BIC to be the best fit. Otherwise, we assume only a narrow line profile.  
+
+Once the spectrum has been classified as either broad or narrow, the H3 component of the Gauss-Hermite function is inspected. If it is negative, we refit the spectrum with an added outflow component. We then compare the outflow fit to the previous best fit by inspecting the BIC of both fits. Again, if $\Delta BIC > 6$, we take the difference between the fits to be significant and declare the fit with the lower BIC to be the true best fit. If $\Delta BIC \leq 6$, we assume that the outflow component is extraneous and discard it. 
 
 ## Installing dependencies 
 To run this code, Nbursts must be installed via Bitbucket. An <a href="https://www.atlassian.com/try/cloud/signup?bundle=bitbucket">Atlassian</a> account is required to do this. If this is your first time using Bitbucket, remember to set up an API token on your local machine! 
@@ -99,7 +96,7 @@ Next, you'll want to add the survey's name and <code>inptable</code> to your cal
 
 <code>process_survey,'sdss',inptable='../IMBH/sdss_files.txt',/plot,nlosvd=3,emexcl=0,emlt1=[1],emlt2=[2],start=[0,100,0,80,0,400,3000,-1.2],/force_sigma,lammin=3700,lammax=9000,degree=2,mdegree=5,path_ssp='/Users/f007znp/Research/stellar_templates/XSL/Kroupa/',prefix='SB_',suffix='_XSL_Kroupa_PC.fits'</code>
 
-## Other useful details 
+### Other useful details 
 A narrow line only fit will look like this: <code>nlosvd=2,emexcl=0,emlt1=[1],start=[0,100,0,80,3000,-1.2]</code>
 
 A narrow line + outflow fit will look like this: <code>nlosvd=3,emexcl=0,emlt1=[1,2],start=[0,100,0,80,0,150,3000,-1.2]</code>
@@ -111,3 +108,13 @@ To fit Gauss-Hermite polynomials, you can add in the keyword <code>moments</code
 You can specify the output path of the file with <code>outpath=''</code>
 
 You can fit only a specific range of lines in your input text file with <code> imin = , imax= ,</code>. For example, <code>imin=1193,imax=1193</code> will fit only line 1193 of the input file. 
+
+## Running the code 
+You'll want to begin by running <code>prepare_file.py</code> to retrieve all necessary SDSS and DESI information. To run this file, you'll need to have <a href = "https://www.sdss4.org/dr17/spectro/spectro_access/"><code>specObj-dr17.fits</code></a>, <a href="https://sdss.org/dr19/data_access/get_data/"><code>spAll-v6_1_3.fits</code>, and <a href = "https://data.desi.lbl.gov/doc/organization/"><code>zall-tilecumulative-iron.fits</code></a>. <b>Please change the paths in the file to match the location of these files on your machine.</b> Then, run <code>prepare_file.py</code> by entering
+<code> python prepare_file.py {YOUR INPUT FILE}.fits {YOUR OUTPUT FILE}.fits </code>
+
+Next, to retrieve SDSS data, run <code>sdss_download.py</code>. You can do this by entering <code>python sdss_download.py {YOUR PREPARED FILE}.fits</code>. <b>Be sure to edit the <code>SDSS_DESTINATION</code> parameter so your data can be located</b>. 
+
+Given the download time of DESI data, you'll need to retrieve that on your own (sorry) :/ 
+
+Now, you're ready to run <code>nburst.scripy.py</code>. To do so, enter <code>python nburst_script.py {YOUR PREPARED INPUT FILE} output.txt</code>.  
