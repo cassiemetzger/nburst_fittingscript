@@ -212,7 +212,7 @@ def main():
             f.write("file, ra, dec, redshift,survey, dropped, continuum, classification, delta_BIC, outflow, fit_fail, hit_limit, nburst_file" + '\n')
     nl_sig_limit = 150 
     finished = False
-    for source in input[:2]: 
+    for source in input: 
         while finished == False: 
             file = source['source file'] 
             ra = source['ra'] 
