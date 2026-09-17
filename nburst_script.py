@@ -205,11 +205,15 @@ def main():
     parser.add_argument("output", type=str, help="The desired output path")
     args = parser.parse_args()
 
-    hdu = fits.open(args.input)
-    input = Table(hdu[1].data)
+    #hdu = fits.open(args.input)
+    hdu = fits.open('./nburst_fittingscript/imbh_sample_prepared.fits')
+    imbh = hdu[1].data
+    m = (imbh['SDSS_CLASS'] == 'QSO') | (imbh['DESI_SPECTYPE'] == 'QSO')
+    #input = Table(hdu[1].data)
+    input = Table(imbh[m])[9:]
     if not os.path.exists(args.output) or os.path.getsize(args.output) == 0:
         with open(args.output, 'w') as f:
-            f.write("file, ra, dec, redshift,survey, dropped, continuum, classification, delta_BIC, outflow, fit_fail, hit_limit, nburst_file" + '\n')
+            f.write("file, ra, dec, redshift,survey, dropped, continuum, classification, delta_BIC, outflow, fit_fail, hit_limit, nburst_file, error message" + '\n')
     nl_sig_limit = 150 
     for source in input: 
         finished = False        # <-- reset here, every source
@@ -227,7 +231,8 @@ def main():
             fit_failed = 0 
             hit_limit = 0 
             nburst_file = 'none'
-            if((((source['SDSS_SPECOBJID'] != '')and (source['SDSS_CLASS'] != 'STAR')) or ((source['DESI_TARGETID'] != '')and (source['DESI_SPECTYPE'] != 'STAR'))) and (source['Rec_Z'] > 0)): 
+            error_message = ''
+            if(source['SDSS_SPECOBJID'] != '' or source['DESI_TARGETID'] != ''): 
                 dropped_source = 0 
                 if((source['Rec_Z']>0.7) and (source['survey'] == 'desi') and (desi_lrg_definition(source) == False)): 
                     continuum = 0 
@@ -235,6 +240,7 @@ def main():
                     continuum = 1
             else: 
                 dropped_source = 1   
+                error_message = "[ERROR] No SDSS or DESI target found"
             if(dropped_source == 0): 
                 if(survey == 'sdss'):
                     fits_path = f"{sdss_filepath}/{file}"
@@ -249,6 +255,7 @@ def main():
                 if not os.path.exists(f"{fits_path}") or os.path.getsize(f"{fits_path}") == 0:
                     file_missing = 1
                 if file_missing ==1:
+                    error_message = "[ERROR] No input spectrum found"
                     fit_failed = 1      # reuse your existing fit_fail column to mark it
                     finished = True      # skip the while-loop fitting entirely for this source
                     
@@ -281,9 +288,14 @@ def main():
                         three = f_parts[2].split(".")[0]   
                     if(source['survey'] == 'sdss'): 
                         nl_nburst_file = glob.glob(f"{fitting_output_location_sdss}/nl_/nbursts_sdss_*{one.strip("0")}*_*{two.strip("0")}*_*{three.strip("0")}*")
+                        if(len(nl_nburst_file) == 0): 
+                            nl_nburst_file = glob.glob(f"{fitting_output_location_sdss}/nl_/nbursts_sdss_*{one.strip("0")}*_*{two.strip("0")}*_*0000*")
+
                     else: 
                         nl_nburst_file = glob.glob(f"{fitting_output_location_desi}/nl_/nbursts_desi_*{one.strip("0")}*_*{two.strip("0")}*_*{three.strip("0")}*")
+                    
                     if len(nl_nburst_file) == 0:
+                        error_message = f"[ERROR] no NBURSTS file found. Searched for {nl_nburst_file}"
                         fit_failed = 1
                         finished = True
                     else:
@@ -295,10 +307,13 @@ def main():
 
                         if(source['survey'] == 'sdss'): 
                             bl_nburst_file = glob.glob(f"{fitting_output_location_sdss}/bl_/nbursts_sdss_*{one.strip('0')}*_*{two.strip('0')}*_*{three.strip('0')}*")
+                            if(len(bl_nburst_file) == 0): 
+                                bl_nburst_file = glob.glob(f"{fitting_output_location_sdss}/bl_/nbursts_sdss_*{one.strip('0')}*_*{two.strip('0')}*_*00000*")
                         else: 
                             bl_nburst_file = glob.glob(f"{fitting_output_location_desi}/bl_/nbursts_desi_*{one.strip('0')}*_*{two.strip('0')}*_*{three.strip('0')}*")
 
                         if len(bl_nburst_file) == 0:
+                            error_message = f"[ERROR] no BL NBURSTS file found. Searched for {bl_nburst_file}"
                             fit_failed = 1
                             finished = True
                         else:
@@ -306,108 +321,120 @@ def main():
                             dof = hdu_nl[0].header['DOF']
                             k_nl = n-dof 
                             hdu_bl = fits.open(bl_nburst_file[0])
-                        sig = hdu_bl[1].data['SIG'][0][2]
-                        if(sig < bl_sig_min or sig > 5*nl_sig): 
-                            classification = 0 
-                        else: 
-                            n = hdu_bl[0].header['NWLFIT']
-                            dof = hdu_bl[0].header['DOF']
-                            k_bl= n-dof 
-                            lammin = hdu_nl[0].header['LAMMIN']
-                            lammax = hdu_nl[0].header['LAMMAX']
-                            if(lammax > 6562.8 and lammin< 6562.8):
-                                target = "H alpha"
-                                idx = np.where(hdu_nl[2].data['LINE_ID'][0] == target)[0][0]
-                                nl_halpha_fl = hdu_nl[2].data['FLUX'][0][idx]
-                                nl_halpha_err = hdu_nl[2].data['FLUX_ERR'][0][idx]
-                                idx = np.where(hdu_bl[2].data['LINE_ID'][0] == target)[0][0]
-                                bl_halpha_fl =  hdu_bl[2].data['FLUX'][0][idx]
-                                bl_halpha_err = hdu_bl[2].data['FLUX_ERR'][0][idx]
-                                if(np.isnan(nl_halpha_fl) or np.isnan(bl_halpha_fl)): 
-                                    fit_failed = 1 
-                                    bic_nl = np.nan
-                                    bic_bl = np.nan
+                            sig = hdu_bl[1].data['SIG'][0][2]
+                            if(sig < bl_sig_min or sig > 5*nl_sig): 
+                                classification = 0 
+                            else: 
+                                n = hdu_bl[0].header['NWLFIT']
+                                dof = hdu_bl[0].header['DOF']
+                                k_bl= n-dof 
+                                lammin = hdu_nl[0].header['LAMMIN']
+                                lammax = hdu_nl[0].header['LAMMAX']
+                                if(lammax > 6562.8 and lammin< 6562.8):
+                                    target = "H alpha"
+                                    idx = np.where(hdu_nl[2].data['LINE_ID'][0] == target)[0][0]
+                                    nl_halpha_fl = hdu_nl[2].data['FLUX'][0][idx]
+                                    nl_halpha_err = hdu_nl[2].data['FLUX_ERR'][0][idx]
+                                    idx = np.where(hdu_bl[2].data['LINE_ID'][0] == target)[0][0]
+                                    bl_halpha_fl =  hdu_bl[2].data['FLUX'][0][idx]
+                                    bl_halpha_err = hdu_bl[2].data['FLUX_ERR'][0][idx]
+                                    if(np.isnan(nl_halpha_fl) or np.isnan(bl_halpha_fl)): 
+                                        fit_failed = 1 
+                                        error_message = "[ERROR] nan Halpha flux"
+                                        bic_nl = np.nan
+                                        bic_bl = np.nan
+                                    else: 
+                                        if(nl_halpha_fl/nl_halpha_err >= 3): 
+                                            bic_nl, chi2_nl = compute_bic(hdu_nl, k_nl, target)
+                                        else: 
+                                            error_message = "[ERROR] Halpha NL not significantly detected"
+                                            bic_nl = np.nan
+                                        if(bl_halpha_fl/bl_halpha_err >= 3):
+                                            bic_bl, chi2_bl = compute_bic(hdu_bl, k_bl, target)
+                                        else: 
+                                            bic_bl = np.nan
+                                            error_message = "[ERROR] Halpha BL not significantly detected"
+
                                 else: 
-                                    if(nl_halpha_fl/nl_halpha_err >= 3): 
-                                        bic_nl, chi2_nl = compute_bic(hdu_nl, k_nl, target)
+                                    target = "Mg II] 2803"
+                                    idx = np.where(hdu_nl[2].data['LINE_ID'][0] == target)[0][0]
+                                    nl_mg_fl = hdu_nl[2].data['FLUX'][0][idx]
+                                    nl_mg_err = hdu_nl[2].data['FLUX_ERR'][0][idx]
+                                    idx = np.where(hdu_bl[2].data['LINE_ID'][0] == target)[0][0]
+                                    bl_mg_fl = hdu_bl[2].data['FLUX'][0][idx]
+                                    bl_mg_err = hdu_bl[2].data['FLUX_ERR'][0][idx]
+                                    if(np.isnan(nl_mg_fl) == False and np.isnan(bl_mg_fl) == False): 
+                                        if(nl_mg_fl/nl_mg_err >= 3): 
+                                            bic_nl_mgII, chi2_nl_mgII = compute_bic(hdu_nl, k_nl, target)
+                                        else: 
+                                            error_message = "[ERROR] MgII NL not significantly detected"
+                                            bic_nl_mgII = np.nan
+                                        if(bl_mg_fl/bl_mg_err >=3): 
+                                            bic_bl_mgII, chi2_bl_mgII = compute_bic(hdu_bl, k_bl, target)
+                                        else: 
+                                            bic_bl_mgII = np.nan
+                                            error_message = "[ERROR] MgII NL not significantly detected"
+                                            
+                                    else: 
+                                        flag_fit = 1 
+                                        bic_nl_mgII = np.nan
+                                        error_message = "[ERROR] nan MgII flux"
+                                        bic_bl_mgII = np.nan
+                                    target = "H beta"
+                                    idx = np.where(hdu_nl[2].data['LINE_ID'][0] == target)[0][0]
+                                    nl_hbeta_fl = hdu_nl[2].data['FLUX'][0][idx]
+                                    nl_hbeta_err = hdu_nl[2].data['FLUX_ERR'][0][idx]
+                                    idx = np.where(hdu_bl[2].data['LINE_ID'][0] == target)[0][0]
+                                    bl_hbeta_fl = hdu_bl[2].data['FLUX'][0][idx]
+                                    bl_hbeta_err = hdu_bl[2].data['FLUX_ERR'][0][idx]
+                                    if(np.isnan(nl_hbeta_fl) == False and np.isnan(bl_hbeta_fl) == False): 
+                                        if(nl_hbeta_fl/nl_hbeta_err >= 3): 
+                                            bic_nl_hbeta, chi2_nl_hbeta = compute_bic(hdu_nl, k_nl, target)
+                                        else: 
+                                            bic_nl_hbeta = np.nan
+                                            error_message = "[ERROR] Hbeta BL not significantly detected"
+                                        if(bl_hbeta_fl/bl_hbeta_err >=3): 
+                                            bic_bl_hbeta, chi2_bl_hbeta = compute_bic(hdu_bl, k_bl, target)
+                                        else: 
+                                            bic_bl_hbeta = np.nan
+                                            error_message = "[ERROR] Hbeta BL not significantly detected"
+                                    else: 
+                                        flag_fit = 1 
+                                        bic_nl_hbeta = np.nan
+                                        bic_bl_hbeta = np.nan
+                                        error_message = "[ERROR] nan Hbeta flux"
+                                    if((np.isnan(nl_mg_fl) or np.isnan(bl_mg_fl) ) and (np.isnan(nl_hbeta_fl) or np.isnan(bl_hbeta_fl))): 
+                                        fit_failed = 1 
+                                    elif((np.isnan(nl_mg_fl) or np.isnan(bl_mg_fl)) and (np.isnan(nl_hbeta_fl) == False and np.isnan(bl_hbeta_fl) == False)):
+                                        bic_nl = nl_hbeta_fl 
+                                        bic_bl = bl_hbeta_fl
+                                    elif((np.isnan(nl_mg_fl) ==False and np.isnan(bl_mg_fl) == False) and (np.isnan(nl_hbeta_fl) or np.isnan(bl_hbeta_fl))):
+                                        bic_nl = nl_mg_fl 
+                                        bic_bl = bl_mg_fl
+                                    elif(np.isnan(nl_mg_fl) == False and np.isnan(bl_mg_fl) == False and np.isnan(nl_hbeta_fl) == False and np.isnan(bl_hbeta_fl) == False): 
+                                        bic_nl = np.mean([bic_nl_mgII, bic_nl_hbeta])
+                                        bic_bl = np.mean([bic_bl_mgII, bic_bl_hbeta])
                                     else: 
                                         bic_nl = np.nan
-                                    if(bl_halpha_fl/bl_halpha_err >= 3):
-                                        bic_bl, chi2_bl = compute_bic(hdu_bl, k_bl, target)
-                                    else: bic_bl = np.nan
-                            else: 
-                                target = "Mg II] 2803"
-                                idx = np.where(hdu_nl[2].data['LINE_ID'][0] == target)[0][0]
-                                nl_mg_fl = hdu_nl[2].data['FLUX'][0][idx]
-                                nl_mg_err = hdu_nl[2].data['FLUX_ERR'][0][idx]
-                                idx = np.where(hdu_bl[2].data['LINE_ID'][0] == target)[0][0]
-                                bl_mg_fl = hdu_bl[2].data['FLUX'][0][idx]
-                                bl_mg_err = hdu_bl[2].data['FLUX_ERR'][0][idx]
-                                if(np.isnan(nl_mg_fl) == False and np.isnan(bl_mg_fl) == False): 
-                                    if(nl_mg_fl/nl_mg_err >= 3): 
-                                        bic_nl_mgII, chi2_nl_mgII = compute_bic(hdu_nl, k_nl, target)
+                                        bic_bl = np.nan
+                                if((np.isnan(bic_nl) == False) and (np.isnan(bic_bl)==False)): 
+                                    if(bic_nl < bic_bl): 
+                                        delta = bic_bl - bic_nl
+                                        delta_BIC = delta 
+                                        if(delta > 2): 
+                                            classification = 0
+                                        else: 
+                                            classification = -1 
                                     else: 
-                                        bic_nl_mgII = np.nan
-                                    if(bl_mg_fl/bl_mg_err >=3): 
-                                        bic_bl_mgII, chi2_bl_mgII = compute_bic(hdu_bl, k_bl, target)
-                                    else: 
-                                        bic_bl_mgII = np.nan
+                                        delta = bic_nl - bic_bl 
+                                        delta_BIC = delta 
+                                        if(delta > 2): 
+                                            classification = 1
+                                        else: 
+                                            classification = -1
+                    
                                 else: 
-                                    flag_fit = 1 
-                                    bic_nl_mgII = np.nan
-                                    bic_bl_mgII = np.nan
-                                target = "H beta"
-                                idx = np.where(hdu_nl[2].data['LINE_ID'][0] == target)[0][0]
-                                nl_hbeta_fl = hdu_nl[2].data['FLUX'][0][idx]
-                                nl_hbeta_err = hdu_nl[2].data['FLUX_ERR'][0][idx]
-                                idx = np.where(hdu_bl[2].data['LINE_ID'][0] == target)[0][0]
-                                bl_hbeta_fl = hdu_bl[2].data['FLUX'][0][idx]
-                                bl_hbeta_err = hdu_bl[2].data['FLUX_ERR'][0][idx]
-                                if(np.isnan(nl_hbeta_fl) == False and np.isnan(bl_hbeta_fl) == False): 
-                                    if(nl_hbeta_fl/nl_hbeta_err >= 3): 
-                                        bic_nl_hbeta, chi2_nl_hbeta = compute_bic(hdu_nl, k_nl, target)
-                                    else: 
-                                        bic_nl_hbeta = np.nan
-                                    if(bl_hbeta_fl/bl_hbeta_err >=3): 
-                                        bic_bl_hbeta, chi2_bl_hbeta = compute_bic(hdu_bl, k_bl, target)
-                                    else: 
-                                        bic_bl_hbeta = np.nan
-                                else: 
-                                    flag_fit = 1 
-                                    bic_nl_hbeta = np.nan
-                                    bic_bl_hbeta = np.nan
-                                if((np.isnan(nl_mg_fl) or np.isnan(bl_mg_fl) ) and (np.isnan(nl_hbeta_fl) or np.isnan(bl_hbeta_fl))): 
                                     fit_failed = 1 
-                                elif((np.isnan(nl_mg_fl) or np.isnan(bl_mg_fl)) and (np.isnan(nl_hbeta_fl) == False and np.isnan(bl_hbeta_fl) == False)):
-                                    bic_nl = nl_hbeta_fl 
-                                    bic_bl = bl_hbeta_fl
-                                elif((np.isnan(nl_mg_fl) ==False and np.isnan(bl_mg_fl) == False) and (np.isnan(nl_hbeta_fl) or np.isnan(bl_hbeta_fl))):
-                                    bic_nl = nl_mg_fl 
-                                    bic_bl = bl_mg_fl
-                                elif(np.isnan(nl_mg_fl) == False and np.isnan(bl_mg_fl) == False and np.isnan(nl_hbeta_fl) == False and np.isnan(bl_hbeta_fl) == False): 
-                                    bic_nl = np.mean([bic_nl_mgII, bic_nl_hbeta])
-                                    bic_bl = np.mean([bic_bl_mgII, bic_bl_hbeta])
-                                else: 
-                                    bic_nl = np.nan
-                                    bic_bl = np.nan
-                            if((np.isnan(bic_nl) == False) and (np.isnan(bic_bl)==False)): 
-                                if(bic_nl < bic_bl): 
-                                    delta = bic_bl - bic_nl
-                                    delta_BIC = delta 
-                                    if(delta > 6): 
-                                        classification = 0
-                                    else: 
-                                        classification = -1 
-                                else: 
-                                    delta = bic_nl - bic_bl 
-                                    delta_BIC = delta 
-                                    if(delta > 6): 
-                                        classification = 1
-                                    else: 
-                                        classification = -1
-                
-                            else: 
-                                fit_failed = 1 
                         if(fit_failed != 1): 
                             if(classification == 1): 
                                 h3 = hdu_bl[1].data['H3'][0][1]
@@ -446,6 +473,7 @@ def main():
                                         bic_orig, chi2_orig = compute_bic(original, k_original, target)
                                     else: 
                                         bic_orig = np.nan 
+                                        error_message = "[ERROR] OIII5008 not significantly detected"
                                     idx = np.where(hdu_out[2].data['LINE_ID'][0] ==target)[0][0]
                                     fl = hdu_out[2].data['FLUX'][0][idx]
                                     fl_err = hdu_out[2].data['FLUX_ERR'][0][idx]
@@ -453,6 +481,7 @@ def main():
                                         bic_out, chi2_out = compute_bic(hdu_out, k_out, target)
                                     else: 
                                         bic_out = np.nan
+                                        error_message = "[ERROR] OIII5008 not significantly detected"
                                     if(np.isnan(bic_orig) or np.isnan(bic_out)): 
                                         fit_failed = 1 
                                         outflow = 0
@@ -462,14 +491,14 @@ def main():
                                         else:
                                             delta_out = bic_out - bic_orig
                                         delta_BIC = delta_out
-                                        if(delta_out > 6): 
+                                        if(delta_out > 2): 
                                             outflow = 1
                             if(classification in (0,-1) and outflow == 0): 
-                                nburst_file = nl_nburst_file[0] if len(nl_nburst_file) > 0 else 'none'
+                                nburst_file = nl_nburst_file[0] 
                             if(classification == 1 and outflow == 0): 
-                                nburst_file = bl_nburst_file[0] if len(bl_nburst_file) > 0 else 'none'
+                                nburst_file = bl_nburst_file[0] 
                             if(outflow ==1): 
-                                nburst_file = out_nburst_file[0] if len(out_nburst_file) > 0 else 'none'
+                                nburst_file = out_nburst_file[0]
                             if(nburst_file != 'none'):
                                 print(f"nburst_file = {nburst_file!r}")
                                 hdu = fits.open(nburst_file)
@@ -489,7 +518,7 @@ def main():
                             finished = True 
             else: 
                 finished = True 
-        line = f"{file}, {ra}, {dec}, {redshift}, {survey}, {dropped_source}, {continuum}, {classification}, {delta_BIC}, {outflow}, {fit_failed}, {hit_limit}, {nburst_file}\n"
+        line = f"{file}, {ra}, {dec}, {redshift}, {survey}, {dropped_source}, {continuum}, {classification}, {delta_BIC}, {outflow}, {fit_failed}, {hit_limit}, {nburst_file}, {error_message}\n"
         with open(args.output, 'a') as f: 
             f.write(line)      
 
