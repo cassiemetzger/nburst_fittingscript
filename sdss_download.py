@@ -10,7 +10,7 @@ import argparse
 SDSS_DESTINATION = '/Users/f007znp/Research/processed/SDSS_BOSS/'
 def download_spectra(table): 
     for source in table: 
-        if(source['SDSS_DR'] == '19.0'): 
+        if(source['SDSS_DR'] == '19'): 
             url = f"https://data.sdss.org/sas/dr19/spectro/sdss/redux/{source['sdss run']}/spectra/full/{source['sdss field']:06d}/{source['sdss mjd']}/{source['source file']}"
         else: 
             url = f"https://data.sdss.org/sas/dr17/sdss/spectro/redux/{source['sdss run']}/spectra/full/{source['sdss plate']:04d}/{source['source file']}"

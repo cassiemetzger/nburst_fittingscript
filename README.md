@@ -5,17 +5,25 @@ This spectral fitting code proceeds as follows:
 <p align="center">
 <img width="600" height="500" alt="Spectral_fitting_flowchart" src="plots/spectral_fitting_simple.png" />
 </p>
-Spectra are grouped by redshift. All spectrum under redshift 0.7 are fit with a stellar continuum </li>
-For spectra above 0.7, we investigate whether or not they are an LRG. SDSS sources are classified as LRGs according to the criteria defined in <a href = "https://arxiv.org/abs/1508.04473"> Dawson+2016</a>. DESI sources are classified as LRGs according to the criteria outlined in <a href = "https://ui.adsabs.harvard.edu/abs/2020RNAAS...4..181Z/abstract"> Zhou+2020</a>.
 
-A narrow line + broad line fit is then applied. A 60 Angstrom window around Halpha is defined and the BIC is computed for the NL + BL fit and then again for NL + BL fit with the BL component subtracted. If Halpha falls outside the observed wavelength range, [Mg II]2796 and Hbeta are inspected instead. If $\Delta BIC > 6$, we take the fit with the lower BIC to be the best fit. Otherwise, we assume only a narrow line profile.  
+We begin by dividing sources into two groups: $z > 0.7$ and $z < 0.7$. All sources with $z < 0.7$ are fit with a stellar continuum. If a source has $z > 0.7$, we check whether or not it is a Luminous Red Galaxy (LRG) according to the criteria defined in <a href = "https://arxiv.org/abs/1508.04473"> Dawson+2016</a> and <a href = "https://ui.adsabs.harvard.edu/abs/2020RNAAS...4..181Z/abstract"> Zhou+2020</a>. If the source is classified as an LRG, we fit its stellar continuum. Then, for all sources, we apply both a narrow line and a narrow line and broad line profile. 
 
-Once the spectrum has been classified as either broad or narrow, the H3 component of the Gauss-Hermite function is inspected. If it is negative, we refit the spectrum with an added outflow component. We then compare the outflow fit to the previous best fit by inspecting the BIC of both fits. Again, if $\Delta BIC > 6$, we take the difference between the fits to be significant and declare the fit with the lower BIC to be the true best fit. If $\Delta BIC \leq 6$, we assume that the outflow component is extraneous and discard it. 
+We first fit each source with a narrow line profile which we start with a FWHM of 34 km/s and limit to 64 km/s. We start our broad line profile fit at the same FWHM, but enforce that the FWHM of the broad line fit must fall between 1.5 and 5 times the FWHM of the narrow line fit. Assuming that our broad line FWHM falls within this range, we compare the quality of the broad line and narrow line fits by inspecting either H𝞪, H𝛃, H𝞬, H𝛿, or MgII]𝝀2803, depending on what lines fall in the wavelength range of our spectrum (3700-9000Å) and what is detected above 3σ. Assuming one of the aforementioned lines is detected in both models, we calculate the Bayesian Information Criterion (BIC; <a href = "https://www.jstor.org/stable/2958889">Schwarz 1978</a>) over a 30Å window around the line for both fits. If ΔBIC > 2, we take the difference between the fits to be significant and assume the fit with the lower BIC value is the best fit. Otherwise, we assume there is no empirical difference between the models and apply a narrow line only fit. 
+
+
+If one of the models does a better job fitting the emission lines than the other, such that an emission line is detected in one model but not the other, we take the model that detected the emission line to be the best fit. 
+
+Then, we inspect the H3 Gauss-Hermite polynomial of the best fit. If H3 is negative, we add an outflow component to the previously determined best fit profile. If [OIII]𝝀5008 is significantly detected, we compute the BIC over a 30Å window around [OIII]𝝀5008 for both the fit with the added outflow component and the fit without.  If [OIII]𝝀5008 is not significantly detected, we do not add an outflow component. If the BIC of the fit with the outflow component and the BIC of the fit without differ by > 6, we take the fit with the lower BIC to be the best fit. Otherwise, we consider the outflow component to be extraneous. 
+
+Once a best fit is determined for all sources, we inspect the narrow line velocity dispersion values of each source. If any of the sigmas are hitting the maximum narrow line velocity dispersion set by the user, we rerun those sources, doubling the maximum allowed narrow line sigma. This process is allowed to repeat three times before the fit will be returned with a narrow line velocity dispersion equivalent to the boundary condition. 
+
 
 ## Installing dependencies 
 To run this code, Nbursts must be installed via Bitbucket. An <a href="https://www.atlassian.com/try/cloud/signup?bundle=bitbucket">Atlassian</a> account is required to do this. If this is your first time using Bitbucket, remember to set up an API token on your local machine! 
 
 While in the Nbursts directory, run <code> git switch autofit </code> to ensure you're on the proper and most updated branch. 
+
+Alternatively, you can grab an <b>unmaintained</b> version of Nbursts from me <a href="https://github.com/cassiemetzger/NBURSTS"> here</a>. 
 
 Once Nbursts is installed, <a href = "https://gal-04.voxastro.org/~chil/Data/NBursts_models/template/">stellar population templates </a> must be downloaded. For this code, you'll need: 
 <ul> 
@@ -117,4 +125,4 @@ Next, to retrieve SDSS data, run <code>sdss_download.py</code>. You can do this 
 
 Given the download time of DESI data, you'll need to retrieve that on your own (sorry) :/ 
 
-Now, you're ready to run <code>nburst.scripy.py</code>. To do so, enter <code>python nburst_script.py {YOUR PREPARED INPUT FILE} output.txt</code>.  
+Now, you're ready to run <code>nburst_script.py</code>. To do so, enter <code>python nburst_script.py {YOUR PREPARED INPUT FILE} output.txt</code>.  

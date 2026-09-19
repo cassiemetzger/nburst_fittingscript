@@ -58,7 +58,7 @@ def main():
             tilelist.append(tile)
             lastnightlist.append(lastnight)
             fiberlist.append(fiber)
-            sourcefile.append(f"desiSp1d_{tile}-thru{lastnight}-{fiber}.fits")
+            sourcefile.append(f"desiSp1d_{tile}-thru{lastnight}-{fiber:04d}.fits")
             fiberflux_z.append(desi['FIBERFLUX_Z'][idx])
             runlist.append('none')
             platelist.append(9999)
@@ -92,7 +92,6 @@ def main():
                 fieldlist.append(dr19_list['FIELD'][idx])
                 mjdlist.append(dr19_list['MJD'][idx])
                 fiberidlist.append(dr19_list['FIBERID_LIST'][idx][0])
-
         else:
             survey.append('none')
             runlist.append('none')
@@ -105,6 +104,7 @@ def main():
             fiberlist.append(9999)
             sourcefile.append('none')
             fiberflux_z.append(9999)
+
     input_tbl['survey'] = survey
     input_tbl['sdss run'] = runlist 
     input_tbl['sdss plate'] = platelist

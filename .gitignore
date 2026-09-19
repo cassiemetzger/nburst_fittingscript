@@ -8,3 +8,10 @@ fit_file.txt
 Halpha_NLoffset.pdf
 example_spectra.pdf
 analyze_results.py
+output_qso.txt 
+output.txt 
+Specfit_subset_prepared.fits
+Specfit_subset.fits
+testing.txt
+liu_fitting_results.txt
+liu_sources.fits

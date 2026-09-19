@@ -24,12 +24,19 @@ from scipy.ndimage import gaussian_filter1d
 import re
 from tqdm import tqdm
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
+##### CHANGE THESE PARAMETERS ACCORDING TO YOUR LOCAL MACHINE ##### 
+
+MAX_WORKERS = 8
 sdss_filepath = '/Users/f007znp/Research/processed/SDSS_BOSS'
 desi_filepath = '/Users/f007znp/Research/processed/DESI'
 output_location = '/Users/f007znp/Research/IMBH/nburst_fittingscript/outputs'
 fitting_output_location_sdss = '/Users/f007znp/Research/pro/trial4/SDSS_BOSS'
 fitting_output_location_desi = '/Users/f007znp/Research/pro/trial4/DESI'
+
+#####################################################################
+
 
 class File:
     def __init__(self, filelist: list, outputpath: str):
@@ -49,7 +56,7 @@ def sdss_flux_mag(f, band):
 def desi_flux_mag(f): 
     return 22.5-2.5*np.log10(f)
 
-def run_gdl_script(gdl_code, workdir=None, timeout=600, total = None, pbar_desc = "Fitting spectra"):
+def run_gdl_script(gdl_code, workdir=None, timeout=600, total=None, pbar_desc="Fitting spectra", verbose=False):
     full_code = "start.pro\n .r /Users/f007znp/Research/nbursts/idl/ppxf_nbursts_c.pro\n" + gdl_code + "\nexit\n"
     with tempfile.NamedTemporaryFile(mode='w', suffix='.pro', delete=False) as f:
         f.write(full_code)
@@ -62,10 +69,11 @@ def run_gdl_script(gdl_code, workdir=None, timeout=600, total = None, pbar_desc 
             text=True, cwd=workdir, bufsize=1
         )
         lines = []
-        pbar = tqdm(total=total, desc=pbar_desc, unit="obj")
+        pbar = tqdm(total=total, desc=pbar_desc, unit="obj", disable=not verbose)
         last_i = 0
         for line in process.stdout:
-            print(line, end="")   
+            if verbose:
+                print(line, end="")
             lines.append(line)
             m = process_re.search(line)
             if m:
@@ -169,7 +177,7 @@ class Fitting:
         run_gdl_script(gdl_code, workdir="/Users/f007znp/Research/pro",total=1, pbar_desc = "Fitting BL")
     def fit_outflow(self, classification, start_velo, sig_max_o, sig_max): 
         if(self.fit_stellarpop): 
-            if(classification in (0,-1)): 
+            if(classification == 'nl'): 
                 gdl_code = (
                         f"process_survey,'{self.survey}',inptable='{self.file}',nlosvd=3,emexcl=0,"
                             f"emlt1=[1,2],start=[0,100,0,80,0,150,3000,-1.2],/force_sigma,"
@@ -177,447 +185,562 @@ class Fitting:
                             f"path_ssp='/Users/f007znp/Research/stellar_templates/XSL/Kroupa/',"
                             f"prefix='SB_',suffix='_XSL_Kroupa_PC.fits',outpath='{self.outpath}/out_'"
                             )
-            else: 
+            elif(classification == 'bl'): 
                 gdl_code = ( f"process_survey,'{self.survey}',inptable='{self.file}',nlosvd=4,emexcl=0,"
                             f"emlt1=[1,2],emlt2 =[3],start=[0,100,0,80,0,150,0,400, 3000,-1.2],/force_sigma,addstart=[0,0,0,0,-{start_velo},0,0,0,0,0],"
                             f"lammin=3700,lammax=9000,degree=2,mdegree=5,moments=4, siglimits=[200,150,{sig_max_o}, {sig_max}],symlosvdid=[2],noh4h6losvdid=[2],"
                             f"path_ssp='/Users/f007znp/Research/stellar_templates/XSL/Kroupa/',"
                             f"prefix='SB_',suffix='_XSL_Kroupa_PC.fits',outpath='{self.outpath}/out_'")
         else: 
-            if(classification in (0,-1)): 
+            if(classification == 'nl'): 
                 gdl_code = ( f"process_survey,'{self.survey}',inptable='{self.file}',nlosvd=3,emexcl=0,"
                             f"emlt1=[1,2],start=[0,100,0,80,0,150,3000,-1.2],/force_sigma,/disable_stpop,addstart=[0,0,0,0,-{start_velo},0,0,0],"
                             f"lammin=3700,lammax=9000,degree=2,mdegree=5,moments=4, siglimits=[200,150,{sig_max_o}],symlosvdid=[2],noh4h6losvdid=[2],"
                             f"outpath='{self.outpath}/out_'")
-            else: 
+            elif(classification == 'bl'): 
                 gdl_code = (f"process_survey,'{self.survey}',inptable='{self.file}',nlosvd=4,emexcl=0,"
                             f"emlt1=[1,2],emlt2 =[3],start=[0,100,0,80,0,150,0,400, 3000,-1.2],symlosvdid=[2],noh4h6losvdid=[2],"
                             f"/force_sigma,/disable_stpop,addstart=[0,0,0,0,-{start_velo},0,0,0,0,0],"
                             f"lammin=3700,lammax=9000,degree=-1,mdegree=5,moments=4, siglimits=[200,150,{sig_max_o},{sig_max}],"
                             "outpath='/Users/f007znp/Research/pro/SDSS_BOSS/scripttest/out_'")
         run_gdl_script(gdl_code, workdir="/Users/f007znp/Research/pro",total=1, pbar_desc = "Fitting outflow")
+def divide_into_continuum_groups(table, definition): 
+    m = table['Rec_Z'] > 0.7 
+    highz = table[m]
+    lowz = table[~m]
+    if(definition == 'sdss'): 
+        lrg = sdss_lrg_definition(highz)
+    else: 
+        lrg = desi_lrg_definition(highz)
+    continuum = vstack([lowz, highz[lrg]])
+    no_continuum = highz[~lrg]
+    return continuum, no_continuum
+
+def write_output_tbl(table, output): 
+    tbl = Table(
+        [table['name'], table['ra'], table['dec'], table['Rec_Z'], table['source file'], 
+         table['continuum'], table['best fit'], table['outflow'],table['Nburst_file'], table['error message']],
+        names=('name', 'ra', 'dec', 'Rec_Z', 'source_file', 'continuum', 'classification', 'outflow','nburst_file', 'error_message')
+    )
+    tbl.write(output, format='ascii', overwrite=True)
+
+def retrieve_nburstfile(source, survey, spectype): 
+    if(survey == 'desi'): 
+            file_loc = fitting_output_location_desi.split("/")
+            error_file = glob.glob(f"{file_loc[0]}/{file_loc[1]}/{file_loc[2]}/{file_loc[3]}/{file_loc[4]}/*{str(source['desi tile']).strip('0')}*_*{str(source['desi lastnight']).strip('0')}*_*{str(source['desi fiberid']).strip('0')}*") 
+            if(len(error_file)>=1):
+                file = 'None' 
+                error_message = f"[ERROR] Fit for file {source['source file']} failed"
+            else:
+                file = glob.glob(f"{fitting_output_location_desi}/{spectype}/nbursts_desi_*{str(source['desi tile']).strip('0')}*_*{str(source['desi lastnight']).strip('0')}*_*{str(source['desi fiberid']).strip('0')}*") 
+                error_message=''
+                if(len(file) == 0): 
+                    file = 'None'
+                    error_message = f"[ERROR] Could not locate NBURSTS file associated with {source['source file']} "
+    else: 
+        if(source['dr'] == 17):
+            file_loc = fitting_output_location_sdss.split("/")
+            error_file = glob.glob(f"{file_loc[0]}/{file_loc[1]}/{file_loc[2]}/{file_loc[3]}/{file_loc[4]}/*{str(source['sdss plate']).strip('0')}*_*{str(source['sdss mjd']).strip('0')}*_*{str(source['sdss fiberid']).strip('0')}*") 
+            if(len(error_file) >=1): 
+                file = 'None'
+                error_message = f"[ERROR] Fit for file {source['source file']} failed"
+            else:
+                file = glob.glob(f"{fitting_output_location_sdss}/{spectype}/nbursts_sdss_*{str(source['sdss plate']).strip('0')}*_*{str(source['sdss mjd']).strip('0')}*_*{str(source['sdss fiberid']).strip('0')}*")
+                error_message=''
+                if(len(file) == 0): 
+                    file = 'None'
+                    error_message = f"[ERROR] Could not locate NBURSTS file associated with {source['source file']} "
+        else: 
+            file_loc = fitting_output_location_sdss.split("/")
+            sdss_file = source['source file'].split('-')
+            error_file = glob.glob(f"{file_loc[0]}/{file_loc[1]}/{file_loc[2]}/{file_loc[3]}/{file_loc[4]}/*{sdss_file[1].strip('0')}*_*{sdss_file[2].strip('0')}*_*{sdss_file[3].split('.')[0].strip('0')}*")
+            if(len(error_file) >=1): 
+                file = 'None'
+                error_message = f"[ERROR] Fit for file {source['source file']} failed"
+            else:
+                file = glob.glob(f"{fitting_output_location_sdss}/{spectype}/nbursts_sdss_*{sdss_file[1].strip('0')}*_*{sdss_file[2].strip('0')}*_*{sdss_file[3].split('.')[0].strip('0')}*")
+                error_message = ''
+                if(len(file) == 0): 
+                    file = glob.glob(f"{fitting_output_location_sdss}/{spectype}/nbursts_sdss_*{sdss_file[1].strip('0')}*_*{sdss_file[2].strip('0')}*_*0000*")
+                    error_message = ''
+                    if(len(file) == 0): 
+                        file = 'None'
+                        error_message = f"[ERROR] Could not locate NBURSTS file associated with {source['source file']} "
+    return file, error_message
+def group_by_similarity(sig, table, tol=20.0):
+    sig = np.asarray(sig, dtype=float)
+    valid_mask = ~np.isnan(sig)
+    valid_idx = np.where(valid_mask)[0]
+
+    groups = []
+    if len(valid_idx) > 0:
+        order = valid_idx[np.argsort(sig[valid_idx])]
+        current_group = [order[0]]
+        for i in range(1, len(order)):
+            idx_prev, idx_curr = order[i-1], order[i]
+            if sig[idx_curr] - sig[idx_prev] <= tol:
+                current_group.append(idx_curr)
+            else:
+                groups.append(current_group)
+                current_group = [idx_curr]
+        groups.append(current_group)
+
+    nan_idx = np.where(~valid_mask)[0]
+    if len(nan_idx) > 0:
+        groups.append(list(nan_idx))
+
+    return groups
+def compare_fits(source, survey, target, file1path, file2path): 
+    if(file1path != 'None' and file2path!= 'None'): 
+        hdu_nl = fits.open(file1path[0])
+        hdu_bl = fits.open(file2path[0])
+        n = hdu_nl[0].header['NWLFIT']
+        dof = hdu_nl[0].header['DOF']
+        k_nl= n-dof
+        n = hdu_bl[0].header['NWLFIT'] 
+        dof = hdu_nl[0].header['DOF']
+        k_bl = n-dof
+        lammin = hdu_nl[0].header['LAMMIN']
+        lammax = hdu_nl[0].header['LAMMAX']
+        idx = np.where(hdu_nl[2].data['LINE_ID'][0] == target)[0][0]
+        if(hdu_nl[2].data['WAVE'][0][idx] >= lammin and hdu_nl[2].data['WAVE'][0][idx] <= lammax): 
+            idx = np.where(hdu_nl[2].data['LINE_ID'][0] == target)[0][0]
+            nl_fl = hdu_nl[2].data['FLUX'][0][idx]
+            nl_fl_err = hdu_nl[2].data['FLUX_ERR'][0][idx]
+            idx = np.where(hdu_bl[2].data['LINE_ID'][0] == target)[0][0]
+            bl_fl = hdu_bl[2].data['FLUX'][0][idx]
+            bl_fl_err = hdu_bl[2].data['FLUX_ERR'][0][idx]
+            if(np.isnan(nl_fl) or np.isnan(nl_fl_err)): 
+                bic_nl = np.nan
+            else: 
+                if(nl_fl/nl_fl_err >= 3): 
+                    bic_nl, chi2_nl = compute_bic(hdu_nl, k_nl, target)
+                else: 
+                    bic_nl = np.nan
+            if(np.isnan(bl_fl) or np.isnan(bl_fl_err)): 
+                bic_bl = np.nan
+            else: 
+                if(bl_fl/bl_fl_err >= 3): 
+                    bic_bl, chi2_bl = compute_bic(hdu_bl, k_bl, target)
+                else: 
+                    bic_bl = np.nan
+        else: 
+            bic_nl = np.nan
+            bic_bl = np.nan
+    else: 
+        bic_nl = np.nan
+        bic_bl = np.nan
+    return bic_nl, bic_bl 
+
+def split_into_batches(filepath, output_location, survey, spectype, n_batches):
+    with open(filepath) as f:
+        lines = [line for line in f if line.strip()]  
+
+    if len(lines) == 0:
+        return []
+
+    chunks = np.array_split(lines, min(n_batches, len(lines)))  
+    batch_paths = []
+    for i, chunk in enumerate(chunks):
+        batch_path = f"{output_location}/{survey}_{spectype}_batch{i}.txt"
+        with open(batch_path, 'w') as f:  
+            f.writelines(chunk)
+        batch_paths.append(batch_path)
+    return batch_paths
+
+def run_one_batch_nl(batch_path, survey, continuum, nl_sig_limit):
+    batch_fit = Fitting(batch_path, survey, continuum, nl_sig_limit)
+    batch_fit.fit_nl()
+    return batch_path
+def run_one_batch_bl(batch_path, survey, continuum,nl_sig_limit, bl_sig_max):
+    batch_fit = Fitting(batch_path, survey, continuum, nl_sig_limit)
+    batch_fit.fit_bl(bl_sig_max)
+    return batch_path
+def run_one_batch_outflow(batch_path, survey, continuum,nl_sig_limit, bl_sig_max, classification, start_velo, sig_max_o): 
+    batch_fit = Fitting(batch_path, survey, continuum, nl_sig_limit) 
+    batch_fit.fit_outflow(classification, start_velo, sig_max_o, bl_sig_max)
+    return batch_path
+
+def add_outflow(table, survey, continuum, classification, nl_sig_limit, max_workers): 
+    sig = []
+    for source in table: 
+        file, error_message = retrieve_nburstfile(source, survey, f"{classification}_")
+        if file != 'None': 
+            hdu = fits.open(file[0])
+            sig.append(hdu[1].data['SIG'][0][1][0])
+        else: 
+            sig.append(np.nan)
+    groups = group_by_similarity(sig, table)
+    batch_jobs = []
+    for i, idx_list in enumerate(groups):
+        group = table[idx_list]
+        med_sig = np.median(np.asarray(sig)[idx_list])
+        bl_sig_max = 5 * med_sig 
+        nl_offset = 1.5*med_sig 
+        out_sig_max = 3*med_sig
+        batch_path = f"{output_location}/{survey}_outflow_batch{i}.txt"
+        for j, source in enumerate(group['source file']): 
+            with open(batch_path, 'a') as f: 
+                if survey == 'sdss': 
+                    f.write(f"{sdss_filepath}/{source}\n")
+                else: 
+                    f.write(f"{desi_filepath}/{group['desi tile'][j]}/{group['desi lastnight'][j]}/1d/{source}\n")
+        if os.path.exists(batch_path) and os.path.getsize(batch_path) > 0:
+            batch_jobs.append((batch_path, bl_sig_max, nl_offset, out_sig_max))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(run_one_batch_outflow, path, survey, True, nl_sig_limit, sig_max, classification, svelo, o_sigmax): path
+                    for path, sig_max, svelo, o_sigmax in batch_jobs}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Fitting outflow batches"):
+                path = futures[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    print(f"[ERROR] Batch {path} failed: {e}")
 
 
+def perform_fitting(table, survey, nl_sig_limit, bic_threshold, max_workers): 
+    if(f"{output_location}/{survey}_continuum.txt" in glob.glob(f"{output_location}/*")): 
+        batch_paths = split_into_batches(f"{output_location}/{survey}_continuum.txt", output_location, survey, "nl", max_workers)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(run_one_batch_nl, path, survey, True, nl_sig_limit): path
+                    for path in batch_paths}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Fitting NL continuum batches"):
+                path = futures[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    print(f"[ERROR] NL batch {path} failed: {e}")
+        m = table['continuum'] == True
+        sig = []
+        for source in table[m]: 
+            file, error_message = retrieve_nburstfile(source, survey, 'nl_')
+            if file != 'None': 
+                hdu = fits.open(file[0])
+                sig.append(hdu[1].data['SIG'][0][1][0])
+            else: 
+                sig.append(np.nan)
+        groups = group_by_similarity(sig, table[m])
+        subset = table[m]   # take this once, so you're not re-filtering every iteration
+        batch_jobs = []
+        for i, idx_list in enumerate(groups): 
+            group = subset[idx_list]        # <-- index with ONE group's flat list, not all groups at once
+            med_sig = np.median(np.asarray(sig)[idx_list])
+            bl_sig_max = 5 * med_sig 
+            batch_path = f"{output_location}/{survey}_bl_batch{i}.txt"
+            for j, source in enumerate(group['source file']): 
+                with open(batch_path, 'a') as f: 
+                    if survey == 'sdss': 
+                        f.write(f"{sdss_filepath}/{source}\n")
+                    else: 
+                        f.write(f"{desi_filepath}/{group['desi tile'][j]}/{group['desi lastnight'][j]}/1d/{source}\n")
+            if os.path.exists(batch_path) and os.path.getsize(batch_path) > 0:
+                batch_jobs.append((batch_path, bl_sig_max))
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(run_one_batch_bl, path, survey, True, nl_sig_limit, sig_max): path
+                    for path, sig_max in batch_jobs}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Fitting BL continuum batches"):
+                path = futures[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    print(f"[ERROR] Batch {path} failed: {e}")
+    if(f"{output_location}/{survey}_nocontinuum.txt" in glob.glob(f"{output_location}/*")): 
+        batch_paths = split_into_batches(f"{output_location}/{survey}_nocontinuum.txt", output_location, survey, "nl", max_workers)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(run_one_batch_nl, path, survey, False, nl_sig_limit): path
+                    for path in batch_paths}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Fitting NL no continuum batches"):
+                path = futures[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    print(f"[ERROR] NL batch {path} failed: {e}")
+        sig = []
+        for source in table[~m]: 
+            file, error_message = retrieve_nburstfile(source, survey, 'nl_')
+            if file != 'None': 
+                hdu = fits.open(file[0])
+                sig.append(hdu[1].data['SIG'][0][1][0])
+            else: 
+                sig.append(np.nan)
+        groups = group_by_similarity(sig, table[~m])
+        subset = table[m]   # take this once, so you're not re-filtering every iteration
+        batch_jobs = []
+
+        for i, idx_list in enumerate(groups): 
+            group = subset[idx_list]        # <-- index with ONE group's flat list, not all groups at once
+            med_sig = np.median(np.asarray(sig)[idx_list])
+            bl_sig_max = 5 * med_sig 
+            batch_path = f"{output_location}/{survey}_bl_batch{i}.txt"
+            for j, source in enumerate(group['source file']): 
+                with open(batch_path, 'a') as f: 
+                    if survey == 'sdss': 
+                        f.write(f"{sdss_filepath}/{source}\n")
+                    else: 
+                        f.write(f"{desi_filepath}/{group['desi tile'][j]}/{group['desi lastnight'][j]}/1d/{source}\n")
+            if os.path.exists(batch_path) and os.path.getsize(batch_path) > 0:
+                batch_jobs.append((batch_path, bl_sig_max))
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(run_one_batch_bl, path, survey, False, nl_sig_limit, sig_max): path
+                    for path, sig_max in batch_jobs}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Fitting BL no continuum batches"):
+                path = futures[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    print(f"[ERROR] Batch {path} failed: {e}")
+    fit = []
+    outflow_mask_nl_cont = [False]*len(table)
+    outflow_mask_bl_cont = [False]*len(table)
+    outflow_mask_nl_nocont = [False]*len(table)
+    outflow_mask_bl_nocont = [False]*len(table)
+    for i, source in enumerate(table): 
+        file_nl, error_message = retrieve_nburstfile(source, source['survey'], 'nl_')
+        file_bl, error_message = retrieve_nburstfile(source, source['survey'], 'bl_')
+        if(file_nl != 'None' and file_bl!='None'): 
+            if(source['Rec_Z'] < 0.371):
+                bic_nl, bic_bl = compare_fits(source, survey, "H alpha", file_nl, file_bl)
+                if(np.isnan(bic_nl) and np.isnan(bic_bl)): 
+                    bic_nl, bic_bl = compare_fits(source, survey, "H beta", file_nl, file_bl)
+                    if(np.isnan(bic_nl) and np.isnan(bic_bl)): 
+                        bic_nl, bic_bl = compare_fits(source, survey, "H gamma", file_nl, file_bl)
+                        if(~np.isnan(bic_nl) and np.isnan(bic_bl)): 
+                            best_fit = 'nl'
+                        elif(np.isnan(bic_nl) and ~np.isnan(bic_bl)): 
+                            best_fit = 'bl'
+                        elif(np.isnan(bic_nl) and np.isnan(bic_bl)): 
+                            bic_nl, bic_bl = compare_fits(source, survey, "H delta", file_nl, file_bl)
+                elif(~np.isnan(bic_nl) and np.isnan(bic_bl)): 
+                    best_fit = 'nl'
+                elif(np.isnan(bic_nl) and ~np.isnan(bic_bl)): 
+                    best_fit = 'bl'
+            else: 
+                bic_nl, bic_bl = compare_fits(source, survey, "H beta", file_nl, file_bl)
+                if(np.isnan(bic_nl) and np.isnan(bic_bl)): 
+                    bic_nl, bic_bl = compare_fits(source, survey, "H gamma", file_nl, file_bl)
+                    if(~np.isnan(bic_nl) and np.isnan(bic_bl)): 
+                        best_fit = 'nl'
+                    elif(np.isnan(bic_nl) and ~np.isnan(bic_bl)): 
+                        best_fit = 'bl'
+                    elif(np.isnan(bic_nl) and np.isnan(bic_bl)): 
+                        bic_nl, bic_bl = compare_fits(source, survey, "H delta", file_nl, file_bl)
+                        if(~np.isnan(bic_nl) and np.isnan(bic_bl)): 
+                            best_fit = 'nl'
+                        elif(np.isnan(bic_nl) and ~np.isnan(bic_bl)): 
+                            best_fit = 'bl'
+                        elif(np.isnan(bic_nl) and np.isnan(bic_bl)): 
+                            bic_nl, bic_nl = compare_fits(source, survey, "H epsilon", file_nl, file_bl)
+                            if(~np.isnan(bic_nl) and np.isnan(bic_bl)): 
+                                best_fit = 'nl'
+                            elif(np.isnan(bic_nl) and ~np.isnan(bic_bl)): 
+                                best_fit = 'bl'
+                            elif(np.isnan(bic_nl) and np.isnan(bic_bl)): 
+                                bic_nl, bic_bl = compare_fits(source, survey, "Mg II] 2803", file_nl, file_bl)
+                                if(~np.isnan(bic_nl) and np.isnan(bic_bl)): 
+                                    best_fit = 'nl'
+                                elif(np.isnan(bic_nl) and ~np.isnan(bic_bl)): 
+                                    best_fit = 'bl'
+                                elif(np.isnan(bic_nl) and np.isnan(bic_bl)): 
+                                    bic_nl, bic_bl = compare_fits(source, survey, "C IV 1550", file_nl, file_bl)
+                                    if(~np.isnan(bic_nl) and np.isnan(bic_bl)): 
+                                        best_fit = 'nl'
+                                    elif(np.isnan(bic_nl) and ~np.isnan(bic_bl)): 
+                                        best_fit = 'bl'
+            if(np.isnan(bic_nl) and np.isnan(bic_bl)): 
+                best_fit = 'None'
+            elif(~np.isnan(bic_nl) and ~np.isnan(bic_bl)): 
+                if(bic_nl < bic_bl): 
+                    delta_bic = bic_bl - bic_nl
+                    if(delta_bic >= bic_threshold): 
+                        best_fit = 'nl'
+                else: 
+                    delta_bic = bic_nl - bic_bl 
+                    if(delta_bic >= bic_threshold): 
+                        best_fit = 'bl'
+        else: 
+            best_fit = 'None'
+        fit.append(best_fit)
+        ## inspect for outflow 
+        if(best_fit == 'nl'): 
+            file, error_message = retrieve_nburstfile(source, source['survey'], 'nl_')
+            if(file != 'None'): 
+                hdu = fits.open(file[0])
+                h3 = hdu[1].data['H3'][0][1]
+                h3_err = hdu[1].data['E_H3'][0][1]
+                if(h3 + h3_err < 0): 
+                    if(source['continuum'] == True): 
+                        outflow_mask_nl_cont[i] = True 
+                    else: 
+                        outflow_mask_nl_nocont[i] = True 
+        elif(best_fit == 'bl'): 
+            file, error_message = retrieve_nburstfile(source, source['survey'], 'bl_')
+            if(file != 'None'): 
+                hdu = fits.open(file[0])
+                h3 = hdu[1].data['H3'][0][1]
+                h3_err = hdu[1].data['E_H3'][0][1]
+                if(h3 + h3_err < 0): 
+                    if(source['continuum'] == True): 
+                        outflow_mask_nl_cont[i] = True 
+                    else: 
+                        outflow_mask_nl_nocont[i] = True
+    o_nl_cont = table[outflow_mask_nl_cont]
+    add_outflow(o_nl_cont, survey, True, 'nl', nl_sig_limit, max_workers)
+    o_nl_nocont = table[outflow_mask_nl_nocont]
+    add_outflow(o_nl_nocont, survey, False, 'nl', nl_sig_limit,max_workers)
+    o_bl_cont = table[outflow_mask_bl_cont]
+    add_outflow(o_bl_cont, survey, True, 'bl', nl_sig_limit,max_workers)
+    o_bl_nocont = table[outflow_mask_bl_nocont]
+    add_outflow(o_bl_nocont, survey, False, 'bl', nl_sig_limit,max_workers)
+    table['best fit'] = fit 
+    ## check that outflow fit is best 
+    outflow_bool = [False]*len(table)
+    for i, source in enumerate(table): 
+        out_file, error_message = retrieve_nburstfile(source, survey, 'out_')
+        if(out_file != 'None' and table['best fit'][i] != 'None'):
+            if(table['best fit'][i] == 'nl'): 
+                orig_file, error_message = retrieve_nburstfile(source, survey, 'nl_')
+            elif(table['best fit'][i] == 'bl'): 
+                orig_file, error_message= retrieve_nburstfile(source, survey, 'bl_')
+            bic_out, bic_orig = compare_fits(source, survey, "[O III] 5008", out_file, orig_file) ## z < 0.8
+            if(~np.isnan(bic_out) and np.isnan(bic_orig)): 
+                outflow_bool = True
+            elif(np.isnan(bic_out) or np.isnan(bic_orig)): 
+                bic_out, bic_orig = compare_fits(source, survey, "[O II] 3729", out_file, orig_file) ## z < 1.41 
+                if(~np.isnan(bic_out) and np.isnan(bic_orig)): 
+                    outflow_bool[i] = True
+                elif(~np.isnan(bic_out) and ~np.isnan(bic_orig)): 
+                    if(bic_out < bic_orig): 
+                        delta_bic = bic_orig- bic_out
+                        if(delta_bic > bic_threshold): 
+                            outflow_bool[i] = True 
+                elif(np.isnan(bic_out) and np.isnan(bic_orig)): 
+                    bic_out, bic_orig = compare_fits(source, survey, "C IV 1550", out_file, orig_file) 
+                    if(~np.isnan(bic_out) and np.isnan(bic_orig)): 
+                                        outflow_bool[i] = True
+                    elif(~np.isnan(bic_out) and ~np.isnan(bic_orig)): 
+                        if(bic_out < bic_orig): 
+                            delta_bic = bic_orig- bic_out
+                            if(delta_bic > bic_threshold): 
+                                outflow_bool[i] = True 
+            elif(~np.isnan(bic_out) and ~np.isnan(bic_orig)): 
+                if(bic_out < bic_orig): 
+                    delta_bic = bic_orig- bic_out
+                    if(delta_bic > bic_threshold): 
+                        outflow_bool[i] = True 
+    table['outflow'] = outflow_bool
+    return table     
+
+def check_errors(table, survey): 
+    errors = []
+    for i, source in enumerate(table):
+        if(table['outflow'][i] == True): 
+            file, error_message = retrieve_nburstfile(source, survey, 'out_') 
+        elif(table['best fit'][i] != 'None'): 
+            file, error_message = retrieve_nburstfile(source, survey, f"{table['best fit'][i]}_")
+        else: 
+            file, error_message = retrieve_nburstfile(source, survey, f"nl_")
+            if(error_message == ""): 
+                bl_file, error_message = retrieve_nburstfile(source, survey, "bl_")
+                if(error_message == ""): 
+                    bic_nl, bic_bl = compare_fits(source, survey, "H alpha", file, bl_file)
+                    if(np.isnan(bic_nl) and np.isnan(bic_bl)): 
+                        error_message = "[ERROR] Halpha not detected; could not determine best fit"
+        errors.append(error_message)
+    table['error message'] = errors 
+    return table 
+
+def get_nburst_filelist(table, survey): 
+    nburst_files = []
+    for i, source in enumerate(table): 
+        if(table['outflow'][i] == True): 
+            file, error = retrieve_nburstfile(source, survey, 'out_')
+        else: 
+            if(table['best fit'][i] == 'nl'): 
+                file, error = retrieve_nburstfile(source, survey, f"nl_")
+            elif(table['best fit'][i] == 'bl'): 
+                file,error = retrieve_nburstfile(source, survey, 'bl_')
+            else: 
+                file = 'None'
+        if(file!= 'None'): 
+            file = file[0]
+        nburst_files.append(file)
+    return nburst_files
+
+
+def run_script(table, survey, max_workers): 
+    finished = False 
+    nl_sig_limit = 150 
+    bic_threshold = 2 
+    i = 0                      # <-- must initialize before the loop; see bug below
+
+    while not finished:
+        os.system(f"rm {output_location}/**")
+        continuum, no_continuum = divide_into_continuum_groups(table, survey)
+        mask = [True if name in continuum['name'] else False for name in table['name']]
+        table['continuum'] = [False] * len(table)
+        table['continuum'][mask] = True 
+        for source in continuum: 
+            with open(f"{output_location}/{survey}_continuum.txt", 'a') as f: 
+                if survey == 'sdss':
+                    f.write(f"{sdss_filepath}/{source['source file']}\n")
+                else: 
+                    f.write(f"{desi_filepath}/{source['desi tile']}/{source['desi lastnight']}/1d/{source['source file']}\n")
+        for source in no_continuum: 
+            with open(f"{output_location}/{survey}_nocontinuum.txt", 'a') as f: 
+                if survey == 'sdss':
+                    f.write(f"{sdss_filepath}/{source['source file']}\n")
+                else: 
+                    f.write(f"{desi_filepath}/{source['desi tile']}/{source['desi lastnight']}/1d/{source['source file']}\n")
+
+        table = perform_fitting(table, survey, nl_sig_limit, bic_threshold, max_workers)
+        nburst_files = get_nburst_filelist(table, survey)
+
+        nl_sig = []
+        for file in nburst_files: 
+            if file != 'None': 
+                hdu = fits.open(file)
+                nl_sig.append(hdu[1].data['SIG'][0][1][0])
+            else: 
+                nl_sig.append(np.nan)
+        nl_sig = np.asarray(nl_sig)         
+
+        m = nl_sig == nl_sig_limit          
+        if np.sum(m) == 0 or i == 3: 
+            finished = True 
+        else: 
+            i += 1
+
+    table = check_errors(table, survey)
+    files = get_nburst_filelist(table, survey)
+    table['Nburst_file'] = files
+    return table
+    
+    
 
 def main():
+    
     parser = argparse.ArgumentParser()
     parser.add_argument("input", type=str, help="The file you want to process")
     parser.add_argument("output", type=str, help="The desired output path")
     args = parser.parse_args()
 
-    #hdu = fits.open(args.input)
-    hdu = fits.open('./nburst_fittingscript/imbh_sample_prepared.fits')
-    imbh = hdu[1].data
-    m = (imbh['SDSS_CLASS'] == 'QSO') | (imbh['DESI_SPECTYPE'] == 'QSO')
-    #input = Table(hdu[1].data)
-    input = Table(imbh[m])[9:]
-    if not os.path.exists(args.output) or os.path.getsize(args.output) == 0:
-        with open(args.output, 'w') as f:
-            f.write("file, ra, dec, redshift,survey, dropped, continuum, classification, delta_BIC, outflow, fit_fail, hit_limit, nburst_file, error message" + '\n')
-    nl_sig_limit = 150 
-    for source in input: 
-        finished = False        # <-- reset here, every source
-        nl_sig_limit = 150      # <-- probably also want this reset per-source (see note below)
-        while finished == False: 
-            file = source['source file'] 
-            ra = source['ra'] 
-            dec = source['dec'] 
-            redshift = source['Rec_Z'] 
-            survey = source['survey']
-            continuum = 0 
-            classification = 0 
-            delta_BIC = 9999
-            outflow = 0 
-            fit_failed = 0 
-            hit_limit = 0 
-            nburst_file = 'none'
-            error_message = ''
-            if(source['SDSS_SPECOBJID'] != '' or source['DESI_TARGETID'] != ''): 
-                dropped_source = 0 
-                if((source['Rec_Z']>0.7) and (source['survey'] == 'desi') and (desi_lrg_definition(source) == False)): 
-                    continuum = 0 
-                else: 
-                    continuum = 1
-            else: 
-                dropped_source = 1   
-                error_message = "[ERROR] No SDSS or DESI target found"
-            if(dropped_source == 0): 
-                if(survey == 'sdss'):
-                    fits_path = f"{sdss_filepath}/{file}"
-                else: 
-                    tile = str(source['desi tile']).strip()
-                    lastnight = str(source['desi lastnight']).strip()
-                    fits_path = f"{desi_filepath}/{tile}/{lastnight}/1d/{file}"
-                with open(f'{output_location}/source_file.txt', 'w') as f: 
-                    f.write(f"{fits_path}\n")
-                print(f"{fits_path}\n")
-                file_missing = 0
-                if not os.path.exists(f"{fits_path}") or os.path.getsize(f"{fits_path}") == 0:
-                    file_missing = 1
-                if file_missing ==1:
-                    error_message = "[ERROR] No input spectrum found"
-                    fit_failed = 1      # reuse your existing fit_fail column to mark it
-                    finished = True      # skip the while-loop fitting entirely for this source
-                    
-                else:
-                    if(continuum == 0): 
-                        fit_stellarpop = False 
-                    else: 
-                        fit_stellarpop = True 
+    hdu = fits.open(args.input)
+    input = Table(hdu[1].data)
 
-                    fitter = Fitting(f"{output_location}/source_file.txt", survey, fit_stellarpop, nl_sig_limit)
-                    fitter.fit_nl()
-                    if(continuum == 0): 
-                        fit_stellarpop = False 
-                    else: 
-                        fit_stellarpop = True 
-
-                    fitter = Fitting(f"{output_location}/source_file.txt", survey, fit_stellarpop, nl_sig_limit)
-                    fitter.fit_nl()
-                    f_raw = ascii.read(f"{output_location}/source_file.txt", format='no_header')[0][0]
-                    if survey == 'sdss':
-                        f_parts = file.split("-")
-                        one = f_parts[1]
-                        two = f_parts[2]
-                        three = f_parts[3]
-                    else:  # desi
-                        f_parts = file.split("-")
-                        # f_parts = ['desiSp1d_82261', 'thru20211120', '2170.fits']
-                        one = f_parts[0].split("_")[1]              # '82261'  -> tile
-                        two = f_parts[1].replace("thru", "")          # '20211120' -> lastnight
-                        three = f_parts[2].split(".")[0]   
-                    if(source['survey'] == 'sdss'): 
-                        nl_nburst_file = glob.glob(f"{fitting_output_location_sdss}/nl_/nbursts_sdss_*{one.strip("0")}*_*{two.strip("0")}*_*{three.strip("0")}*")
-                        if(len(nl_nburst_file) == 0): 
-                            nl_nburst_file = glob.glob(f"{fitting_output_location_sdss}/nl_/nbursts_sdss_*{one.strip("0")}*_*{two.strip("0")}*_*0000*")
-
-                    else: 
-                        nl_nburst_file = glob.glob(f"{fitting_output_location_desi}/nl_/nbursts_desi_*{one.strip("0")}*_*{two.strip("0")}*_*{three.strip("0")}*")
-                    
-                    if len(nl_nburst_file) == 0:
-                        error_message = f"[ERROR] no NBURSTS file found. Searched for {nl_nburst_file}"
-                        fit_failed = 1
-                        finished = True
-                    else:
-                        hdu_nl = fits.open(nl_nburst_file[0])
-                        nl_sig = hdu_nl[1].data['SIG'][0][-1]
-                        bl_sig_min = 1.5*nl_sig
-                        sig_max = 5*nl_sig
-                        fitter.fit_bl(sig_max)
-
-                        if(source['survey'] == 'sdss'): 
-                            bl_nburst_file = glob.glob(f"{fitting_output_location_sdss}/bl_/nbursts_sdss_*{one.strip('0')}*_*{two.strip('0')}*_*{three.strip('0')}*")
-                            if(len(bl_nburst_file) == 0): 
-                                bl_nburst_file = glob.glob(f"{fitting_output_location_sdss}/bl_/nbursts_sdss_*{one.strip('0')}*_*{two.strip('0')}*_*00000*")
-                        else: 
-                            bl_nburst_file = glob.glob(f"{fitting_output_location_desi}/bl_/nbursts_desi_*{one.strip('0')}*_*{two.strip('0')}*_*{three.strip('0')}*")
-
-                        if len(bl_nburst_file) == 0:
-                            error_message = f"[ERROR] no BL NBURSTS file found. Searched for {bl_nburst_file}"
-                            fit_failed = 1
-                            finished = True
-                        else:
-                            n = hdu_nl[0].header['NWLFIT']
-                            dof = hdu_nl[0].header['DOF']
-                            k_nl = n-dof 
-                            hdu_bl = fits.open(bl_nburst_file[0])
-                            sig = hdu_bl[1].data['SIG'][0][2]
-                            if(sig < bl_sig_min or sig > 5*nl_sig): 
-                                classification = 0 
-                            else: 
-                                n = hdu_bl[0].header['NWLFIT']
-                                dof = hdu_bl[0].header['DOF']
-                                k_bl= n-dof 
-                                lammin = hdu_nl[0].header['LAMMIN']
-                                lammax = hdu_nl[0].header['LAMMAX']
-                                if(lammax > 6562.8 and lammin< 6562.8):
-                                    target = "H alpha"
-                                    idx = np.where(hdu_nl[2].data['LINE_ID'][0] == target)[0][0]
-                                    nl_halpha_fl = hdu_nl[2].data['FLUX'][0][idx]
-                                    nl_halpha_err = hdu_nl[2].data['FLUX_ERR'][0][idx]
-                                    idx = np.where(hdu_bl[2].data['LINE_ID'][0] == target)[0][0]
-                                    bl_halpha_fl =  hdu_bl[2].data['FLUX'][0][idx]
-                                    bl_halpha_err = hdu_bl[2].data['FLUX_ERR'][0][idx]
-                                    if(np.isnan(nl_halpha_fl) or np.isnan(bl_halpha_fl)): 
-                                        fit_failed = 1 
-                                        error_message = "[ERROR] nan Halpha flux"
-                                        bic_nl = np.nan
-                                        bic_bl = np.nan
-                                    else: 
-                                        if(nl_halpha_fl/nl_halpha_err >= 3): 
-                                            bic_nl, chi2_nl = compute_bic(hdu_nl, k_nl, target)
-                                        else: 
-                                            error_message = "[ERROR] Halpha NL not significantly detected"
-                                            bic_nl = np.nan
-                                        if(bl_halpha_fl/bl_halpha_err >= 3):
-                                            bic_bl, chi2_bl = compute_bic(hdu_bl, k_bl, target)
-                                        else: 
-                                            bic_bl = np.nan
-                                            error_message = "[ERROR] Halpha BL not significantly detected"
-
-                                else: 
-                                    target = "Mg II] 2803"
-                                    idx = np.where(hdu_nl[2].data['LINE_ID'][0] == target)[0][0]
-                                    nl_mg_fl = hdu_nl[2].data['FLUX'][0][idx]
-                                    nl_mg_err = hdu_nl[2].data['FLUX_ERR'][0][idx]
-                                    idx = np.where(hdu_bl[2].data['LINE_ID'][0] == target)[0][0]
-                                    bl_mg_fl = hdu_bl[2].data['FLUX'][0][idx]
-                                    bl_mg_err = hdu_bl[2].data['FLUX_ERR'][0][idx]
-                                    if(np.isnan(nl_mg_fl) == False and np.isnan(bl_mg_fl) == False): 
-                                        if(nl_mg_fl/nl_mg_err >= 3): 
-                                            bic_nl_mgII, chi2_nl_mgII = compute_bic(hdu_nl, k_nl, target)
-                                        else: 
-                                            error_message = "[ERROR] MgII NL not significantly detected"
-                                            bic_nl_mgII = np.nan
-                                        if(bl_mg_fl/bl_mg_err >=3): 
-                                            bic_bl_mgII, chi2_bl_mgII = compute_bic(hdu_bl, k_bl, target)
-                                        else: 
-                                            bic_bl_mgII = np.nan
-                                            error_message = "[ERROR] MgII NL not significantly detected"
-                                            
-                                    else: 
-                                        flag_fit = 1 
-                                        bic_nl_mgII = np.nan
-                                        error_message = "[ERROR] nan MgII flux"
-                                        bic_bl_mgII = np.nan
-                                    target = "H beta"
-                                    idx = np.where(hdu_nl[2].data['LINE_ID'][0] == target)[0][0]
-                                    nl_hbeta_fl = hdu_nl[2].data['FLUX'][0][idx]
-                                    nl_hbeta_err = hdu_nl[2].data['FLUX_ERR'][0][idx]
-                                    idx = np.where(hdu_bl[2].data['LINE_ID'][0] == target)[0][0]
-                                    bl_hbeta_fl = hdu_bl[2].data['FLUX'][0][idx]
-                                    bl_hbeta_err = hdu_bl[2].data['FLUX_ERR'][0][idx]
-                                    if(np.isnan(nl_hbeta_fl) == False and np.isnan(bl_hbeta_fl) == False): 
-                                        if(nl_hbeta_fl/nl_hbeta_err >= 3): 
-                                            bic_nl_hbeta, chi2_nl_hbeta = compute_bic(hdu_nl, k_nl, target)
-                                        else: 
-                                            bic_nl_hbeta = np.nan
-                                            error_message = "[ERROR] Hbeta BL not significantly detected"
-                                        if(bl_hbeta_fl/bl_hbeta_err >=3): 
-                                            bic_bl_hbeta, chi2_bl_hbeta = compute_bic(hdu_bl, k_bl, target)
-                                        else: 
-                                            bic_bl_hbeta = np.nan
-                                            error_message = "[ERROR] Hbeta BL not significantly detected"
-                                    else: 
-                                        flag_fit = 1 
-                                        bic_nl_hbeta = np.nan
-                                        bic_bl_hbeta = np.nan
-                                        error_message = "[ERROR] nan Hbeta flux"
-                                    if((np.isnan(nl_mg_fl) or np.isnan(bl_mg_fl) ) and (np.isnan(nl_hbeta_fl) or np.isnan(bl_hbeta_fl))): 
-                                        fit_failed = 1 
-                                    elif((np.isnan(nl_mg_fl) or np.isnan(bl_mg_fl)) and (np.isnan(nl_hbeta_fl) == False and np.isnan(bl_hbeta_fl) == False)):
-                                        bic_nl = nl_hbeta_fl 
-                                        bic_bl = bl_hbeta_fl
-                                    elif((np.isnan(nl_mg_fl) ==False and np.isnan(bl_mg_fl) == False) and (np.isnan(nl_hbeta_fl) or np.isnan(bl_hbeta_fl))):
-                                        bic_nl = nl_mg_fl 
-                                        bic_bl = bl_mg_fl
-                                    elif(np.isnan(nl_mg_fl) == False and np.isnan(bl_mg_fl) == False and np.isnan(nl_hbeta_fl) == False and np.isnan(bl_hbeta_fl) == False): 
-                                        bic_nl = np.mean([bic_nl_mgII, bic_nl_hbeta])
-                                        bic_bl = np.mean([bic_bl_mgII, bic_bl_hbeta])
-                                    else: 
-                                        bic_nl = np.nan
-                                        bic_bl = np.nan
-                                if((np.isnan(bic_nl) == False) and (np.isnan(bic_bl)==False)): 
-                                    if(bic_nl < bic_bl): 
-                                        delta = bic_bl - bic_nl
-                                        delta_BIC = delta 
-                                        if(delta > 2): 
-                                            classification = 0
-                                        else: 
-                                            classification = -1 
-                                    else: 
-                                        delta = bic_nl - bic_bl 
-                                        delta_BIC = delta 
-                                        if(delta > 2): 
-                                            classification = 1
-                                        else: 
-                                            classification = -1
-                    
-                                else: 
-                                    fit_failed = 1 
-                        if(fit_failed != 1): 
-                            if(classification == 1): 
-                                h3 = hdu_bl[1].data['H3'][0][1]
-                                h3_err = hdu_bl[1].data['E_H3'][0][1]
-                                sig = hdu_bl[1].data['SIG'][0][1]
-                            else: 
-                                h3 = hdu_nl[1].data['H3'][0][1]
-                                h3_err = hdu_nl[1].data['E_H3'][0][1]
-                                sig = hdu_bl[1].data['SIG'][0][1]
-                            start_velo = 1.5*sig 
-                            sig_max_o= 3*sig 
-                            if(h3+h3_err < 0): 
-                                fitter.fit_outflow(classification, start_velo, sig_max_o, sig_max)
-                                if(source['survey'] == 'sdss'): 
-                                    out_nburst_file = glob.glob(f"{fitting_output_location_sdss}/out_/nbursts_sdss_*{one.strip("0")}*_*{two.strip("0")}*_*{three.strip("0")}*")
-                                else: 
-                                    out_nburst_file = glob.glob(f"{fitting_output_location_desi}/out_/nbursts_desi_*{one.strip("0")}*_*{two.strip("0")}*_*{three.strip("0")}*")
-                                hdu_out = fits.open(out_nburst_file[0])
-                                n = hdu_out[0].header['NWLFIT']
-                                dof = hdu_out[0].header['DOF']
-                                k_out = n-dof
-                                if(classification in (0,-1)): 
-                                    original = hdu_nl
-                                    k_original = k_nl
-                                else: 
-                                    original = hdu_bl 
-                                    k_original = k_bl
-                                lammin = hdu_out[0].header['LAMMIN']
-                                lammax = hdu_out[0].header['LAMMAX']
-                                if(lammin <= 5008 and lammax >= 5008): 
-                                    target = "[O III] 5008"
-                                    idx = np.where(original[2].data['LINE_ID'][0] ==target)[0][0]
-                                    fl = original[2].data['FLUX'][0][idx]
-                                    fl_err = original[2].data['FLUX_ERR'][0][idx]
-                                    if(fl/fl_err >= 3): 
-                                        bic_orig, chi2_orig = compute_bic(original, k_original, target)
-                                    else: 
-                                        bic_orig = np.nan 
-                                        error_message = "[ERROR] OIII5008 not significantly detected"
-                                    idx = np.where(hdu_out[2].data['LINE_ID'][0] ==target)[0][0]
-                                    fl = hdu_out[2].data['FLUX'][0][idx]
-                                    fl_err = hdu_out[2].data['FLUX_ERR'][0][idx]
-                                    if(fl/fl_err >= 3): 
-                                        bic_out, chi2_out = compute_bic(hdu_out, k_out, target)
-                                    else: 
-                                        bic_out = np.nan
-                                        error_message = "[ERROR] OIII5008 not significantly detected"
-                                    if(np.isnan(bic_orig) or np.isnan(bic_out)): 
-                                        fit_failed = 1 
-                                        outflow = 0
-                                    else: 
-                                        if(bic_orig > bic_out): 
-                                            delta_out = bic_orig - bic_out 
-                                        else:
-                                            delta_out = bic_out - bic_orig
-                                        delta_BIC = delta_out
-                                        if(delta_out > 2): 
-                                            outflow = 1
-                            if(classification in (0,-1) and outflow == 0): 
-                                nburst_file = nl_nburst_file[0] 
-                            if(classification == 1 and outflow == 0): 
-                                nburst_file = bl_nburst_file[0] 
-                            if(outflow ==1): 
-                                nburst_file = out_nburst_file[0]
-                            if(nburst_file != 'none'):
-                                print(f"nburst_file = {nburst_file!r}")
-                                hdu = fits.open(nburst_file)
-                                sig = hdu[1].data['SIG'][0][1][0]
-                                if(np.isclose(sig, nl_sig_limit, atol=1e-1)): 
-                                    if(2*nl_sig_limit < 850):
-                                        nl_sig_limit= 2*nl_sig_limit
-                                    else: 
-                                        nl_sig_limit = 850
-                                        finished = True
-                                    hit_limit = 1 
-                                else: 
-                                    finished = True
-                            else: 
-                                finished = True 
-                        else: 
-                            finished = True 
-            else: 
-                finished = True 
-        line = f"{file}, {ra}, {dec}, {redshift}, {survey}, {dropped_source}, {continuum}, {classification}, {delta_BIC}, {outflow}, {fit_failed}, {hit_limit}, {nburst_file}, {error_message}\n"
-        with open(args.output, 'a') as f: 
-            f.write(line)      
-
-
-
-    """
-
-    # remove sources without sdss or desi counterparts and stars 
-    dropped_sources = np.asarray([0]*len(input))
-    m = (((input['SDSS_SPECOBJID'] != '')& (input['SDSS_CLASS'] != 'STAR')) | ((input['DESI_TARGETID'] != '')& (input['DESI_SPECTYPE'] != 'STAR'))) & (input['Rec_Z'] > 0)
-    dropped_sources[m] = 1 
-    output_tbl['Dropped'] = dropped_sources
-
-    survey_full = np.array(['none'] * len(input), dtype=object)
-    survey_full[m & (input['DESI_TARGETID'] != '')] = 'desi'
-    survey_full[m & (input['SDSS_SPECOBJID'] != '') & (survey_full != 'desi')] = 'sdss'
-    output_tbl['survey'] = survey_full
-    continuum = np.array([1] * len(input))
-    redshift_sort_mask = (input['Rec_Z']>0.7) & (output_tbl['survey'] == 'desi') & (desi_lrg_definition(input) == False)
-    continuum[redshift_sort_mask] = 0
-    redshift_sort_mask = (input['Rec_Z']>0.7) & (output_tbl['survey'] == 'sdss') & (sdss_lrg_definition(input) == False)
-    continuum[redshift_sort_mask] = 0
-    output_tbl['continuum'] = continuum
-    input = input[m]
-    
-
-    # sort by survey 
-    m_desi = input['survey'] == 'desi'
-    desilist = input[m_desi]
-    m_sdss = input['survey'] == 'sdss'
-    sdsslist = input[m_sdss]
-
-    # sort by redshift for each survey 
-    zcutoff = 0.7
-    lowz_desi, highz_desi = sort_redshift(desilist, zcutoff)
-    lowz_sdss, highz_sdss = sort_redshift(sdsslist, zcutoff)
-
-    # check whether highz sources are lrgs 
-    m = desi_lrg_definition(highz_desi)
-    lowz_desi = vstack([lowz_desi, highz_desi[m]]) # add lrgs to lowz source list as they should be fit with stellar continuum 
-    highz_desi = highz_desi[~m]
-    m = sdss_lrg_definition(highz_sdss)
-    lowz_sdss = vstack([lowz_sdss, highz_sdss[m]]) # add lrgs to lowz source list as they should be fit with stellar continuum 
-    highz_sdss = highz_sdss[~m]
-    
-    
-    # output into file lists to be fit 
-    desi_filelist = [
-            f"{desi_filepath}/{s['desi tile']}/{s['desi lastnight']}/1d/{s['source file']}"
-            for s in lowz_desi]
-    filelist = File(desi_filelist, f'{output_location}/desi_files_lowz.txt')
-    filelist.write_output()
-    desi_filelist = [
-                f"{desi_filepath}/{s['desi tile']}/{s['desi lastnight']}/1d/{s['source file']}"
-                for s in highz_desi]
-    filelist = File(desi_filelist, f'{output_location}/desi_files_highz.txt')
-    filelist.write_output()
-    sdss_filelist = [
-            f"{sdss_filepath}/{s['source file']}"
-            for s in lowz_sdss]
-    filelist = File(sdss_filelist, f'{output_location}/sdss_files_lowz.txt')
-    filelist.write_output()
-    sdss_filelist = [
-                f"{sdss_filepath}/{s['source file']}"
-                for s in highz_sdss]
-    filelist = File(sdss_filelist, f'{output_location}/sdss_files_highz.txt')
-    filelist.write_output()
-
-    # fit 
-    fitter = Fitting(f'{output_location}/sdss_files_lowz.txt', 'sdss', True, 150)
-    fitter.run_full()
-
-
-    ascii.write(output_tbl, args.output, format = 'csv', overwrite = True)
-
-
-
-
-
-    m_desi = (input['survey'] == 'desi') & (input['DESI_SPECTYPE'] != 'STAR') & (input['Rec_Z'] > 0.7) 
-
-    desi_filelist = [
-        f"{desi_filepath}/{s['desi tile']}/{s['desi lastnight']}/1d/{s['source file']}"
-        for s in input[m_desi]]
-    filelist = File(desi_filelist, f'{output_location}/desi_files.txt')
-    filelist.write_output()
-
-    m_sdss = (input['survey'] == 'sdss') * (input['SDSS_CLASS'] != 'STAR') & (input['Rec_Z'] > 0)
-    sdss_filelist = [
-        f"{sdss_filepath}/{s['source file']}"
-        for s in input[m_sdss]]
-    filelist = File(sdss_filelist, f'{output_location}/sdss_files.txt')
-    filelist.write_output()
-    """
-
-    
-
-
-
+    m = (input['survey'] == 'sdss') & (input['survey'] != 'desi')
+    sdss_sources = input[m]
+    m = input['survey'] == 'desi'
+    desi_sources = input[m]
+    sdss_table = run_script(sdss_sources, 'sdss', MAX_WORKERS)
+    desi_table = run_script(desi_sources, 'desi', MAX_WORKERS)
+    sdss_table['continuum'] = sdss_table['continuum'].astype(bool)
+    desi_table['continuum'] = desi_table['continuum'].astype(bool)
+    sdss_table['best fit'] = sdss_table['best fit'].astype(str)
+    desi_table['best fit'] = desi_table['best fit'].astype(str)
+    table_tot = vstack([sdss_table, desi_table])
+    write_output_tbl(table_tot, args.output)
 
 if __name__ == "__main__":
     main()
